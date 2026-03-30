@@ -12,6 +12,23 @@ let searchSelectionEnd = null
 const expandedRemoteIds = new Set()
 const expandedLocalIds = new Set()
 
+function normalizeCard(card = {}) {
+  return {
+    name: card.name || '',
+    position: card.position || card.raw_position || card.custom_position || '',
+    reversed: !!card.reversed,
+  }
+}
+
+function getReadingSignature(row = {}) {
+  const cards = (row.cards || []).map(normalizeCard)
+  return JSON.stringify({
+    question_type: row.question_type || '',
+    question: row.question || '',
+    cards,
+  })
+}
+
 function formatDate(dateString) {
   if (!dateString) return '—'
   return new Date(dateString).toLocaleString('zh-TW', { hour12: false })
@@ -51,19 +68,38 @@ function buildRemoteGroups(rows = []) {
       map.set(key, {
         id: key,
         client_name: row.client_name,
-        question_type: row.question_type,
-        question: row.question,
         created_at: row.created_at,
-        readings: [],
-        cards: [],
+        latest_at: row.updated_at || row.created_at,
+        readingsMap: new Map(),
       })
     }
     const group = map.get(key)
-    group.readings.push(row)
-    if (!group.created_at || new Date(row.created_at) > new Date(group.created_at)) group.created_at = row.created_at
-    ;(row.cards || []).forEach((card) => group.cards.push(card))
+    const signature = getReadingSignature(row)
+    const existing = group.readingsMap.get(signature)
+    const currentTime = new Date(row.updated_at || row.created_at || 0).getTime()
+    const existingTime = existing ? new Date(existing.updated_at || existing.created_at || 0).getTime() : -1
+
+    if (!existing || currentTime >= existingTime) {
+      group.readingsMap.set(signature, row)
+    }
+
+    if (!group.created_at || new Date(row.created_at) < new Date(group.created_at)) group.created_at = row.created_at
+    if (!group.latest_at || new Date(row.updated_at || row.created_at) > new Date(group.latest_at)) group.latest_at = row.updated_at || row.created_at
   })
-  return Array.from(map.values()).sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+
+  return Array.from(map.values())
+    .map((group) => {
+      const readings = Array.from(group.readingsMap.values())
+        .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+      return {
+        id: group.id,
+        client_name: group.client_name,
+        created_at: group.created_at,
+        latest_at: group.latest_at,
+        readings,
+      }
+    })
+    .sort((a, b) => new Date(b.latest_at) - new Date(a.latest_at))
 }
 
 async function loadRemoteReadings() {
