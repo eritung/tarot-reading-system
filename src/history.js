@@ -30,16 +30,40 @@ function readingToSearchText(item, isLocal = false) {
   if (isLocal) {
     const generatedTexts = (item.generatedReadings || []).map((g) => [g.aiResult, g.payloadSnapshot?.cards?.map((c) => c.name).join(' ')].filter(Boolean).join(' ')).join(' ')
     const cards = (item.drawnCards || []).map((c) => `${c.cardName} ${c.position || ''} ${c.customPosition || ''}`).join(' ')
-    return [item.customerName, item.questionType, item.questionContent, item.aiResult, generatedTexts, cards].filter(Boolean).join(' ').toLowerCase()
+    return [item.customerName, item.questionType, item.questionContent, item.aiResult, generatedTexts, cards, formatDate(item.updatedAt)].filter(Boolean).join(' ').toLowerCase()
   }
   const cards = (item.cards || []).map((c) => `${c.name} ${c.position || ''} ${c.raw_position || ''} ${c.custom_position || ''}`).join(' ')
-  return [item.client_name, item.question_type, item.question, item.ai_result, cards].filter(Boolean).join(' ').toLowerCase()
+  const results = (item.readings || []).map((r) => r.ai_result || '').join(' ')
+  return [item.client_name, item.question_type, item.question, results || item.ai_result, cards, formatDate(item.created_at)].filter(Boolean).join(' ').toLowerCase()
 }
 
 function filterReadings(list, isLocal = false) {
   const query = keyword.trim().toLowerCase()
   if (!query) return list
   return list.filter((item) => readingToSearchText(item, isLocal).includes(query))
+}
+
+function buildRemoteGroups(rows = []) {
+  const map = new Map()
+  rows.forEach((row) => {
+    const key = [row.client_name || '未命名客戶', row.question_type || '', row.question || ''].join('||')
+    if (!map.has(key)) {
+      map.set(key, {
+        id: key,
+        client_name: row.client_name,
+        question_type: row.question_type,
+        question: row.question,
+        created_at: row.created_at,
+        readings: [],
+        cards: [],
+      })
+    }
+    const group = map.get(key)
+    group.readings.push(row)
+    if (!group.created_at || new Date(row.created_at) > new Date(group.created_at)) group.created_at = row.created_at
+    ;(row.cards || []).forEach((card) => group.cards.push(card))
+  })
+  return Array.from(map.values()).sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
 }
 
 async function loadRemoteReadings() {
@@ -53,12 +77,15 @@ async function loadRemoteReadings() {
     remoteReadings = []
     return
   }
-  remoteReadings = data || []
+  remoteReadings = buildRemoteGroups(data || [])
 }
 
 async function deleteRemote(id) {
-  if (!confirm('確定要刪除這筆雲端紀錄嗎？')) return
-  const { error } = await supabase.from('readings').delete().eq('id', id)
+  const target = remoteReadings.find((item) => item.id === id)
+  const ids = target?.readings?.map((item) => item.id) || []
+  if (!ids.length) return
+  if (!confirm(`確定要刪除「${target?.client_name || '此客戶'}」的雲端紀錄嗎？`)) return
+  const { error } = await supabase.from('readings').delete().in('id', ids)
   if (error) return alert(`刪除失敗：${error.message}`)
   await loadRemoteReadings()
   render()
@@ -66,15 +93,15 @@ async function deleteRemote(id) {
 
 function renderSearchBar() {
   return `
-    <section class="panel panel-gold history-tools-panel" style="margin-bottom:20px;">
-      <a class="button btn-ghost back-home-btn" href="./index.html">← 返回主頁</a>
+    <a class="button btn-ghost back-home-btn" href="./index.html">← 返回主頁</a>
+    <section class="panel panel-gold history-tools-panel history-search-section">
       <div class="history-tools-grid">
         <div class="history-search-wrap">
           <h2 class="section-title">✦ 搜尋紀錄</h2>
           <div class="divider"></div>
           <label class="label">關鍵字篩選</label>
-          <input class="input" id="keywordSearch" placeholder="可搜尋客戶姓名、問題內容、牌名、解牌文字..." value="${escapeHtml(keyword)}">
-          <div class="helper" style="margin-top:8px;">目前會同時篩選雲端紀錄與本機備份紀錄。</div>
+          <input class="input" id="keywordSearch" placeholder="可搜尋客戶姓名、問題內容、牌名、解牌文字、建立時間..." value="${escapeHtml(keyword)}">
+          <div class="helper" style="margin-top:8px;">目前會同時篩選雲端紀錄與本機備份紀錄，也可搜尋建立／更新時間。</div>
         </div>
         <div class="history-tools-actions">
           <button class="button btn-danger" id="clearAllBtn" ${state.history.length ? '' : 'disabled'}>清空本機資料</button>
@@ -129,10 +156,10 @@ function render() {
                 <div class="kv">
                   <div class="helper">問題類型</div><div>${escapeHtml(item.question_type || '—')}</div>
                   <div class="helper">提問內容</div><div>${escapeHtml(item.question || '—')}</div>
-                  <div class="helper">抽牌張數</div><div>${item.cards?.length || 0} 張</div>
+                  <div class="helper">結果筆數</div><div>${item.readings?.length || 0} 筆</div>
                   <div class="helper">抽到的牌</div><div>${escapeHtml((item.cards || []).map((c) => `${c.name}${c.reversed ? '（逆位）' : ''}`).join('、') || '—')}</div>
                 </div>
-                ${renderResultToggle(resultHtml, expanded, 'remote', item.id)}
+                ${renderResultToggle((item.readings || []).map((reading, idx) => `<div style="margin-bottom:12px;"><strong>第 ${idx + 1} 筆：</strong><br>${escapeHtml(reading.ai_result || '尚未生成').replace(/\n/g, '<br>')}</div>`).join(''), expanded, 'remote', item.id)}
               </article>`
             }).join('')}
           </div>`}
@@ -176,31 +203,24 @@ function render() {
   if (searchInput) {
     if (shouldRefocusSearch) {
       searchInput.focus()
-      const nextStart = searchSelectionStart ?? keyword.length
-      const nextEnd = searchSelectionEnd ?? nextStart
-      searchInput.setSelectionRange(nextStart, nextEnd)
+      const pos = searchSelectionEnd ?? keyword.length
+      searchInput.setSelectionRange(pos, pos)
       shouldRefocusSearch = false
     }
     searchInput.addEventListener('compositionstart', () => { isComposing = true })
     searchInput.addEventListener('compositionend', (e) => {
       isComposing = false
       keyword = e.target.value
-      searchSelectionStart = e.target.selectionStart
-      searchSelectionEnd = e.target.selectionEnd
+      searchSelectionEnd = e.target.selectionStart
       shouldRefocusSearch = true
       render()
     })
     searchInput.addEventListener('input', (e) => {
       if (isComposing) return
       keyword = e.target.value
-      searchSelectionStart = e.target.selectionStart
-      searchSelectionEnd = e.target.selectionEnd
+      searchSelectionEnd = e.target.selectionStart
       shouldRefocusSearch = true
       render()
-    })
-    searchInput.addEventListener('keydown', (e) => {
-      searchSelectionStart = e.target.selectionStart
-      searchSelectionEnd = e.target.selectionEnd
     })
   }
 

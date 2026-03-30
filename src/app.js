@@ -15,6 +15,7 @@ function uid(prefix = 'id') {
 }
 
 function showToast(msg, type = 'success') {
+  document.querySelectorAll('.toast').forEach((el) => el.remove())
   const toast = document.createElement('div')
   toast.className = `toast ${type}`
   toast.textContent = msg
@@ -77,13 +78,33 @@ function nextCustomer() {
 
 function deleteCard(id) {
   state.current.drawnCards = state.current.drawnCards.filter((c) => c.id !== id)
+  state.current.generatedReadings = state.current.generatedReadings.filter((item) => {
+    const sourceId = item?.payloadSnapshot?.cards?.[0]?.source_id
+    return sourceId ? sourceId !== id : true
+  })
   persistCurrent()
+  syncCurrentToHistory()
   render()
+}
+
+function deleteGeneratedResult(id) {
+  const target = state.current.generatedReadings.find((item) => item.id === id)
+  if (!target) return
+  const sourceId = target?.payloadSnapshot?.cards?.[0]?.source_id
+  state.current.generatedReadings = state.current.generatedReadings.filter((item) => item.id !== id)
+  if (sourceId) {
+    state.current.drawnCards = state.current.drawnCards.filter((card) => card.id !== sourceId)
+  }
+  persistCurrent()
+  syncCurrentToHistory()
+  render()
+  showToast('已移除該張牌與對應解牌結果')
 }
 
 function buildCardsPayload(cards = state.current.drawnCards, useReversal = state.current.useReversal) {
   return cards.map((card, index) => ({
     order: index + 1,
+    source_id: card.id,
     name: card.cardName,
     position: card.position === '其他' ? (card.customPosition || '自訂牌位') : card.position,
     raw_position: card.position,
@@ -130,7 +151,7 @@ function openModal(editCard = null) {
       <div class="panel panel-gold modal">
         <div class="row modal-head">
           <h3 class="section-title">✦ ${editCard ? '編輯牌卡' : '選擇塔羅牌'}</h3>
-          <button class="button btn-ghost" data-close>✕</button>
+          <button class="button btn-ghost modal-close-btn" data-close aria-label="關閉">✕</button>
         </div>
         <div class="divider"></div>
         <div style="display:grid; gap:16px;">
@@ -254,7 +275,7 @@ async function requestSingleReading(payload, targetResultId = null) {
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...payload, regenerate_reading_id: targetResultId || undefined }),
   })
 
   const data = await response.json()
@@ -319,22 +340,24 @@ async function generateAI(options = {}) {
       return
     }
 
-    const existingCardKeys = new Set(
+    const existingPayloadKeys = new Set(
       state.current.generatedReadings
-        .map((item) => JSON.stringify(item.payloadSnapshot?.cards?.[0] || null))
+        .map((item) => JSON.stringify(item.payloadSnapshot || null))
         .filter(Boolean)
     )
 
-    const cardPayloads = payload.cards
+    let cardPayloads = payload.cards
       .map((card) => ({
         ...payload,
         cards: [structuredClone(card)],
       }))
-      .filter((singlePayload) => !existingCardKeys.has(JSON.stringify(singlePayload.cards[0])))
+      .filter((singlePayload) => !existingPayloadKeys.has(JSON.stringify(singlePayload)))
 
     if (!cardPayloads.length) {
-      showToast('目前抽出的牌都已各自產生過結果，可直接使用單筆重新生成。', 'error')
-      return
+      cardPayloads = payload.cards.map((card) => ({
+        ...payload,
+        cards: [structuredClone(card)],
+      }))
     }
 
     const loadingItems = cardPayloads.map((singlePayload, index) => ({
@@ -440,6 +463,11 @@ function bindInputs() {
     if (!item?.payloadSnapshot) return
     generateAI({ payload: structuredClone(item.payloadSnapshot), targetResultId: item.id })
   }))
+  app.querySelectorAll('[data-remove-result]').forEach((el) => el.addEventListener('click', () => {
+    const item = state.current.generatedReadings.find((r) => r.id === el.dataset.removeResult)
+    const cardName = item?.payloadSnapshot?.cards?.[0]?.name || '這張牌'
+    if (item && confirm(`確定要移除「${cardName}」與對應結果嗎？`)) deleteGeneratedResult(item.id)
+  }))
 }
 
 function renderHeaderOnly() {
@@ -458,10 +486,11 @@ function renderResultCards() {
       <div class="row result-card-head">
         <div>
           <div class="card-meta">${item.title || `第 ${index + 1} 次解牌`}・${new Date(item.updatedAt || item.createdAt || Date.now()).toLocaleString('zh-TW', { hour12: false })}</div>
-          <div class="result-card-summary">${item.payloadSnapshot?.cards?.map((c) => c.name).join('、') || '—'}</div>
+          <div class="result-card-summary tarot-card-title">${item.payloadSnapshot?.cards?.map((c) => c.name).join('、') || '—'}</div>
         </div>
         <div class="row result-card-actions">
           <button class="button btn-gold" type="button" data-regenerate-result="${item.id}" ${item.isLoading || state.current.isGenerating ? 'disabled' : ''}>${item.isLoading ? '占卜中…' : '重新生成'}</button>
+          <button class="button btn-danger" type="button" data-remove-result="${item.id}" ${item.isLoading || state.current.isGenerating ? 'disabled' : ''}>移除此牌</button>
         </div>
       </div>
       <div class="divider"></div>
@@ -489,7 +518,6 @@ function render() {
         <div class="brand brand-center-mobile">
           <h1>🔮 塔羅解牌系統</h1>
           <small id="headerMeta">${state.current.customerName ? `目前諮詢：${state.current.customerName}` : ''}</small>
-          <div class="helper" style="margin-top:6px;">打開網頁即可直接使用，解牌結果會同步寫入 Supabase 與本機備份。</div>
         </div>
         <div class="row header-button-group center-mobile-buttons">
           <a class="button btn-outline header-compact-btn" href="./history.html">📋 歷史紀錄</a>
