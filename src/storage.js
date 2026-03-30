@@ -10,6 +10,7 @@ export function createEmptySession() {
     useReversal: false,
     aiResult: '',
     drawnCards: [],
+    generatedReadings: [],
     isStarted: false,
   }
 }
